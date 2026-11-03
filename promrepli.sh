@@ -26,4 +26,4 @@ docker rm -f promgraf
  	rm -rf /promgraf/hosts
  	cp /TopStor/promgrafhosts /promgraf/hosts
  	sed -i "s/MYCLUSTER/$myhostip/g" /promgraf/hosts 
- 	docker run -d -p $myhostip:4000:3000 -v /promgraf/grafana.ini:/etc/grafana/grafana.ini -v /promgraf:/var/lib/grafana -v /promgraf/hosts:/etc/hosts --name promgraf grafana/grafana
+ 	docker run -d -p $myhostip:4000:3000 -e GF_SERVER_PROTOCOL=https -e GF_SERVER_CERT_FILE=/etc/grafana/TopStor.crt -e GF_SERVER_CERT_KEY=/etc/grafana/TopStor.key -v /promgraf/grafana.ini:/etc/grafana/grafana.ini -v /promgraf:/var/lib/grafana -v /promgraf/hosts:/etc/hosts -v /TopStor/grafana/TopStor.crt:/etc/grafana/TopStor.crt -v /TopStor/grafana/TopStor.key:/etc/grafana/TopStor.key --name promgraf grafana/grafana
