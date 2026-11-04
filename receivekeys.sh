@@ -26,7 +26,7 @@ then
  chmod 700 /root/.ssh
  [ -f /root/.ssh/authorized_keys ] || : > /root/.ssh/authorized_keys
  authkeys=`cat /root/.ssh/authorized_keys | grep -v $partner`
- echo $authkeys > /root/.ssh/authorized_keys
+ echo "$authkeys" > /root/.ssh/authorized_keys
  echo $keys | sed 's/\_spc\_/ /g' >> /root/.ssh/authorized_keys
  sshd=`cat /etc/ssh/sshd_config | grep -v "Port 22" | grep -v $port`
  echo -e "$sshd" > /etc/ssh/sshd_config

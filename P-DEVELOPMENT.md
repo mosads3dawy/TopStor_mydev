@@ -3423,3 +3423,10 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   refuses the whole list; the user's own name when none, as before).
 * **Also:** `UnixDelUser` rewrote the only member of a group to `no` (a fake member that `UnixChangeUser` then appended to: `no,usr2`); it writes the
   empty-group marker `NoUser` now, like `UnixAddGroup`.
+
+## 106. receivekeys.sh collapsed authorized_keys onto one line: ssh keys of all other nodes stopped working — `QSD5.315` (2026-11-04) `M`
+
+* **Found by:** QC test 21, after the replication partners were added: root ssh to the cluster-2 nodes was refused (publickey) from every other host except one.
+* **Root cause:** `receivekeys.sh` kept the old keys with `authkeys=\`... | grep -v $partner\`; echo $authkeys > /root/.ssh/authorized_keys`. The unquoted
+  `echo` joins all lines into ONE line, so only the first key still worked.
+* **Fix:** `echo "$authkeys" > /root/.ssh/authorized_keys` (one key per line is kept). The other key scripts have no such pattern.
