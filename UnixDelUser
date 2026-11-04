@@ -73,7 +73,7 @@ then
    cusers='/'`echo $usersall | awk -F'/' '{print $3}'`'/'
    cusersleft=`echo $usersall | cut -d/ -f1-2`
    cusersright=`echo $usersall | cut -d/ -f4-`
-   newusers=`echo ${cusers} | sed "s/,$username,/,/g" | sed "s/\/$username,/\//g" | sed "s/,$username\//\//g" | sed "s/\/$username\//\/no\//g"`
+   newusers=`echo ${cusers} | sed "s/,$username,/,/g" | sed "s/\/$username,/\//g" | sed "s/,$username\//\//g" | sed "s/\/$username\//\/NoUser\//g"`
    newop=${cusersleft}${newusers}$cusersright
    echo newop $newop
    /pace/etcdput.py $etcd usersigroup/$cgrp $newop 

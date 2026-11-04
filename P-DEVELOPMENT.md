@@ -3407,3 +3407,19 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   before the container start or no export at all.
 * **Fix:** `pace/closthost.sh`: right before the resume/export the owner is read again (`cpoolowner.sh of`); a pool owned by
   another node than the lost one (the take-over already has it) is logged `already taken over by … -- NOT exported` and left alone.
+
+## 105. A group membership change never reached the receiving cluster: user replicated without its groups — `QSD5.315` (2026-11-04) `M`
+
+* **Found by:** QC test 21 (replication, 1 node + 2 transmitters, 1 receiver), step 8 "users and groups replicate to the other cluster": usr3 added
+  inside grp3 on the sender -> the receiver got grp3 and usr3, but usr3 only in Everyone and grp3 `NoUser`; unchanged after 8 minutes.
+* **Root cause (1):** `pace/usersyncall.py` `thread_add()` took the groups of the user from `usersplit[2]` of `usersinfo/<user>`
+  (`<id>:<gd>:/<pool>/<user>/<size>/...`), which is the USER NAME. The receiver ran `UnixAddUser ... groups<user>,Everyone`, so only Everyone
+  was applied.
+* **Root cause (2):** the only other carrier, the `sync/UsrChange` request filed by `UnixChangeUser`, is stamped `now+10 s` while the `sync/user`
+  request is stamped when `UnixAddUser` finishes. On a slow sender (UnixChangeUser took ~40 s) the UsrChange sorts BEFORE the user
+  (`checksyncs.reqorder`), the receiver runs `UnixChangeUser` when the user does not exist yet (`id` fails, silent exit) and the change is lost.
+* **Fix:** `usersyncall.usersgroups()`: the groups handed to `UnixAddUser` are the `usersigroup/<group>` entries of the sender that list the
+  user (Everyone excluded, groups that do not exist yet on the node skipped because the initial sync adds users before groups and `usermod -G`
+  refuses the whole list; the user's own name when none, as before).
+* **Also:** `UnixDelUser` rewrote the only member of a group to `no` (a fake member that `UnixChangeUser` then appended to: `no,usr2`); it writes the
+  empty-group marker `NoUser` now, like `UnixAddGroup`.
