@@ -3441,3 +3441,13 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
 * **Fix:** `pace/heartbeat.py`: the `elif myhost == leader: leadernextlead(knowns)` is back directly after the `if tries < 10: hostlost(...)` it belongs to; the
   Recovery scan is unchanged. `pace/etcdgets.py` also did not compile (`print('('_1')')` in its except path); now `print('(_1)')`.
 * **Check:** `python3 -m py_compile pace/*.py` must pass (worth adding to the build gate).
+
+## 108. A follower that missed the leader's nextlead sync kept a stale nextlead/er forever: no take-over — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 21 step 23 (repeat of the node2 power cut): the leader held `nextlead/er = dhcp237906/10.11.11.202` but node3's LOCAL etcd kept `None`
+  after node3 was hung and reset while the leader named it. `hostlost()` / `checkleader.py` read `nextlead/er` from the local etcd, so no take-over.
+* **Root cause:** `heartbeat.leadernextlead()` posts `sync/nextlead/Add_er_*` only when the value changes; the request is pruned by the leader once the key
+  count exceeds the ready count. On restart `docker_setup.sh` runs `checksyncs.py restetcd` (copies only the `wholeetcd` keys, `nextlead` is not among them) and then only
+  `syncrequest`; `syncall` (which copies `nextlead`) runs for never-initialised nodes only. docker_setup no longer writes `nextlead/er` for a joining node (d42a8df).
+* **Fix:** `pace/checksyncs.py` `restetcd()`: after the `wholeetcd` loop also `synckeys(leaderip, myhostip, 'nextlead', 'nextlead')`, so every (re)started follower copies the leader's value.
+  Applies on node (re)start only; a follower that stays up and missed the request is not re-synced (leadernextlead was left unchanged on purpose: re-posting every cycle would need a remote read of each follower).
