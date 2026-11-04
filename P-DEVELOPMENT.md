@@ -3451,3 +3451,16 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   `syncrequest`; `syncall` (which copies `nextlead`) runs for never-initialised nodes only. docker_setup no longer writes `nextlead/er` for a joining node (d42a8df).
 * **Fix:** `pace/checksyncs.py` `restetcd()`: after the `wholeetcd` loop also `synckeys(leaderip, myhostip, 'nextlead', 'nextlead')`, so every (re)started follower copies the leader's value.
   Applies on node (re)start only; a follower that stays up and missed the request is not re-synced (leadernextlead was left unchanged on purpose: re-posting every cycle would need a remote read of each follower).
+
+## 109. A follower that took the cluster over served no API: fapilooper was started on the boot-time primary only — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 21 step 24 (unplug the CIFS on c2 after node3 took c2 over): `10.11.11.200:5001` gave no answer; the flask container was up
+  (httpd only, no `fapi.py`) and no `/pace/fapilooper.sh` ran on node3 (physical/VM flavour).
+* **Root cause:** commit 004cb1a5 (2026-10-06) moved `/pace/fapilooper.sh & disown` in `docker_setup.sh` from after `registerports.sh` (every node) into the
+  `if [ $isprimary -ne 0 ]` block, next to the flask `docker run`. A configured node that boots while the cluster ip answers gets `isprimary=0`, so it never
+  started the looper. The take-over path (`heartbeat.py` -> `leaderlost.sh` -> `docker_primary.sh`) only creates the flask container (its fapilooper line is
+  commented since cb8f8629). `docker_setup.container.sh` kept the start outside the block and was not affected.
+* **Fix:** `docker_setup.sh`: the looper starts on every node again, just before the primary block (`pgrep -f /pace/fapilooper.sh || setsid nohup ... &`), so it
+  still picks up the primary's flask container within 2 s (the goal of 004cb1a5); on a follower `docker exec flask` fails and it retries every 2 s.
+  `docker_primary.sh`: right after the flask `docker run` the same guarded, detached start (no duplicate looper; detached so heartbeat.py's wait on leaderlost.sh returns).
+* **Check:** after a take-over `pgrep -f fapilooper` on the new leader shows one looper, `docker top flask` shows `fapi.py`, `curl http://<clusterip>:5001/` answers.

@@ -89,6 +89,10 @@ sed -i "s/MYCLUSTER/$leaderip/g" $shttpdf
 echo running httpd fowrarder as I am not primary
 docker run --rm --name httpd --hostname shttpd --net ${DOCKER_NET:-bridge0} -v /etc/localtime:/etc/localtime:ro -v /root/gitrepo/resolv.conf:/etc/resolv.conf -p $myclusterip:19999:19999 -p $myclusterip:80:80 -p $myclusterip:443:443 -v $shttpdf:/usr/local/apache2/conf/httpd.conf -v /root/topstorwebetc:/usr/local/apache2/topstorwebetc -v /topstorweb:/usr/local/apache2/htdocs/ -itd moataznegm/quickstor:git
 docker run -itd --rm --name flask --hostname apisrv -v /etc/localtime:/etc/localtime:ro -v /pace/:/pace -v /pacedata/:/pacedata/ -v /root/gitrepo/resolv.conf:/etc/resolv.conf --net ${DOCKER_NET:-bridge0} -p $myclusterip:5001:5001 -v /TopStor/:/TopStor -v /TopStordata/:/TopStordata moataznegm/quickstor:flask3
+# The API: fapilooper starts fapi.py in the flask container.  docker_setup.sh starts it on every node, but make sure
+# it runs here too (a node set up without it would serve no API after the take over); detached, so heartbeat.py's
+# wait on leaderlost.sh is not held by it, and only once.
+pgrep -f /pace/fapilooper.sh >/dev/null || setsid nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null &
 # No monitoring container here.  What a client needs first after a take over is the cluster ip, etcd, the UI and the
 # API, in that order.  grafana used to be recreated in this script (before httpd and flask, which cost them seconds; and
 # with /ToStor/promgrafhosts, a path that does not exist).  It was thrown away again a moment later: leaderlost.sh runs

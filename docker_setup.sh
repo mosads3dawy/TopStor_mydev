@@ -614,6 +614,11 @@ rm -rf /promgraf/grafana.db
 cp /TopStor/grafana.db /promgraf/
 echo /TopStor/getcversion.sh $myclusterip $leader $myhost >/dev/null & disown
 /TopStor/getcversion.sh $myclusterip $leader $myhost >/dev/null & disown
+# fapilooper (the login API) runs on EVERY node, as in docker_setup.container.sh: it retries every 2 s and starts
+# fapi.py as soon as a flask container exists, i.e. right after the docker run below on the primary, or after a
+# take over (docker_primary.sh) on a node that is a follower now.  Started before the primary block so the API
+# still comes up first on the primary.
+pgrep -f /pace/fapilooper.sh >/dev/null || setsid nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null &
 if [ $isprimary -ne 0 ];
 then
 	echo I am hhhhhhhhhhhhhhhhhhhhhhinnhgjjjjhhhhhhhhhhhhhere
@@ -639,7 +644,6 @@ then
 	echo running httpd
 	docker run --rm --name httpd --hostname shttpd --net bridge0 -v /etc/localtime:/etc/localtime:ro -v /root/gitrepo/resolv.conf:/etc/resolv.conf -p $myclusterip:19999:19999 -p $myclusterip:81:81 -p 443:443 -v $shttpdf:/usr/local/apache2/conf/httpd.conf -v /root/topstorwebetc:/usr/local/apache2/topstorwebetc -v /topstorweb:/usr/local/apache2/htdocs/ -itd moataznegm/quickstor:git
 	docker run -itd --rm --name flask --hostname apisrv -v /etc/localtime:/etc/localtime:ro -v /pace/:/pace -v /pacedata/:/pacedata/ -v /root/gitrepo/resolv.conf:/etc/resolv.conf --net bridge0 -p $myclusterip:5001:5001 -v /TopStor/:/TopStor -v /TopStordata/:/TopStordata moataznegm/quickstor:flask3
-	/pace/fapilooper.sh & disown
 	/TopStor/promserver.sh $myclusterip
 fi
 mydns=`/TopStor/etcdget.py $myclusterip dnsname/$myhost`
