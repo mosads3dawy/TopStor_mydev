@@ -3430,3 +3430,14 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
 * **Root cause:** `receivekeys.sh` kept the old keys with `authkeys=\`... | grep -v $partner\`; echo $authkeys > /root/.ssh/authorized_keys`. The unquoted
   `echo` joins all lines into ONE line, so only the first key still worked.
 * **Fix:** `echo "$authkeys" > /root/.ssh/authorized_keys` (one key per line is kept). The other key scripts have no such pattern.
+
+## 107. heartbeat.py did not compile: heartbeatlooper crash-looped, no host-loss detection and no take-over — `QSD5.315` (2026-11-04) `M`
+
+* **Found by:** QC test 21 step 23 (sudden death of c2node_1, CIFS must stay reachable through node3): after 25 min node3 had not taken over
+  (leader key still the dead node, no `nextlead/er`, no pool imported).
+* **Root cause:** commit d42a8df ("fixing", QSD5.314) added `elif myhost == leader: leadernextlead(knowns)` right after `if tries < 10: hostlost(...)`.
+  A later change inserted the "Recovery" try/except block between them, leaving the `elif` orphaned after `except` (SyntaxError, line ~199).
+  `heartbeatlooper.sh` restarted the failing `/pace/heartbeat.py` every second.
+* **Fix:** `pace/heartbeat.py`: the `elif myhost == leader: leadernextlead(knowns)` is back directly after the `if tries < 10: hostlost(...)` it belongs to; the
+  Recovery scan is unchanged. `pace/etcdgets.py` also did not compile (`print('('_1')')` in its except path); now `print('(_1)')`.
+* **Check:** `python3 -m py_compile pace/*.py` must pass (worth adding to the build gate).
