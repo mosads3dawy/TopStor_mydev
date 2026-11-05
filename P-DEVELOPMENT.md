@@ -3529,3 +3529,25 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
 * **Check:** `partners/AddPartner` with a phrase ending in a newline or containing a space answers `invalid phrase` and logs `Partnargfa`; with a clean phrase
   the partner is added; `etcdctl get sync/ --prefix -w json` shows no key containing `
 `; `isinsync` reaches yes; `Partner/*` stays on the leader under load.
+
+## 113. One malformed sync ack re-acked itself every pass for ever (no self-heal, unbounded `sync/Partnr` growth) — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 22 step 16.5, after the fix of note 112 was deployed and the flooded keys were deleted by hand: `sync/Partnr/*` grew again
+  (~80 keys/min on the c1 leader, +1 per pass on c2), every junk key `sync/Partnr/Add_...::<phrase>/dhcpA/dhcpB/...` = `/request`, `isinsync` stayed `no`.
+* **Root cause (`pace/checksyncs.py`):** requests and acks are told apart by substring only. `get(leaderip,'sync','request')` (`etcdgetpy.py`) keeps an
+  entry when `request` is anywhere in `(key, value)`, so a key whose VALUE is `/request` counts; it has no `/request/dhcp` in the key and its value is never
+  a value of one of my acks, so it is a "request". The ack `put(leaderip, syncleft+'/'+myhost, stamp)` assumes `syncleft` ends with `/request`; for such a
+  key it writes `<key>/<myhost>` = `/request`, which is again a "request" next pass: a self-sustaining fixed point (tree with 2 hosts, chain with 1). The
+  seed was the newline mis-pairing of note 112; once one such key exists the newline is no longer needed. Nothing removes it: the leader prune only
+  counts keys with `request` in the KEY, `insync()` sees the junk as a group with no request root, the follower delete is a no-op, and a hand delete loses
+  the race against the pass in flight (`syncrequestlooper.sh`, every 2 s), which re-seeds the chain.
+* **Fix (pace, this commit):**
+  * `syncrequest()`: entries whose key has no `/request` ("bad acks") are split off right after the read and never handled as requests.
+  * Before the ack write: no ack for a key without `/request` or one that already contains `/request/dhcp`.
+  * Leader: deletes each bad ack by its EXACT key (`etcdctl del <key>`, no `--prefix`; `etcddel.py`'s substring modes could hit good keys); followers
+    delete their local copies the same way and leave them out of the old local clean-up (which would have run a substring delete of `/request`).
+    Deleted only when the key starts with `sync/`, has no `/request` and no `/initial/`, and the value is exactly `/request` (`isbadack()`); every key
+    containing `/request` and `sync/*/initial/*` are never touched by this code.
+  * `insync()`: only keys containing `/request` are counted.
+* **Check:** with the junk present, after the deploy the `sync/Partnr` counts fall to the `initial/*` entries only (3/3/2 on .100/.102/.200) within a few
+  passes and stay there, `isinsync` = yes; a partner re-add creates `.../request` + `.../request/dhcpX` acks that are pruned as before.
