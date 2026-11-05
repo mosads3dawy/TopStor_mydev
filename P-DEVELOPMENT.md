@@ -3464,3 +3464,38 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   still picks up the primary's flask container within 2 s (the goal of 004cb1a5); on a follower `docker exec flask` fails and it retries every 2 s.
   `docker_primary.sh`: right after the flask `docker run` the same guarded, detached start (no duplicate looper; detached so heartbeat.py's wait on leaderlost.sh returns).
 * **Check:** after a take-over `pgrep -f fapilooper` on the new leader shows one looper, `docker top flask` shows `fapi.py`, `curl http://<clusterip>:5001/` answers.
+
+## 110. Split brain: a follower imported the pool the leader held after one failed etcd read — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 21 step 30.5 (wait for sync green in c2): c2 never got green. c2's pool was imported on BOTH c2 nodes (leader node3 since
+  02:39, follower node2 `zpool import -d /tmp/impdir-<pool> <id>` + `zpool reguid` at 03:55 node time); `pools/` and `poolnxt/` disagreed between the
+  two etcds and `poolnxt` flipped every ~40 s. Trigger: a minutely replication receive under load made the leader's etcd slow ("context deadline exceeded").
+* **Root cause:** `pace/zpooltoimport.py` runs every 9 s on every node. `poolnxt/<pool>` is the STANDBY assignment (it names a node other than the owner
+  in the normal steady state); the only check before the import was "the pool is in the leader's `hosts/*/current`" (`getall`). `pace/etcdgetpy.etcdget()`
+  ignored etcdctl's exit code: a failed read gave `[]` / `'_1'`, i.e. "nobody holds it", and the `'not reachable'` guards in zpooltoimport were dead code.
+  ZFS did not refuse either (no `/etc/hostid`, hostid 0, `multihost=off`). The failed-import path `dels(leaderip,'pools/',pool)` deleted every `pools/`
+  key matching the name, the real owner's too. `pace/selectimport.py` read `pools/` from the follower's LOCAL etcd: after the double import each node
+  took itself for the owner and re-pointed `poolnxt` at the other one every round.
+* **Fix (fail closed, pace 0fcd5ee):**
+  * `etcdgetpy.etcdget(..., strict=True)` (keyword-only) returns `['not reachable']` when etcdctl fails (rc != 0, or a 30 s hang). Without `strict` the
+    results are unchanged for every existing caller (a hang now ends after 30 s as a failed read instead of blocking).
+  * `zpooltoimport.py`: `poolnxt/` and `hosts/*/current` are read strictly from the leader; a failed read skips the round. Before `zpool import` it reads
+    the leader's `pools/<pool>` and `ready/`: a failed read skips the round; an owner that is another READY host -> not imported. Import only when the key is
+    absent, names this node, or names a host that is not ready (`hostlost()` removes `ready/<host>` and its `pools/` entries, so a real take-over still works).
+  * failed import: `pools/<pool>` is deleted only if it names this node (exact key/value pair).
+  * `selectimport.py`: `pools/` from the leader's etcd and `ready/`, both strict; a failed read skips the round.
+* **Recommended, not done (product setup, needs its own test):** unique hostid per node (`zgenhostid` once at install) and `zpool set multihost=on` on the
+  shared pools, so ZFS itself refuses to import a pool that is active on the other node; `cachefile=none` (or `zfs-import-cache` disabled) for shared pools, so a
+  reboot never auto-imports a pool from `/etc/zfs/zpool.cache` before `docker_setup.sh` runs `zpool export -a`.
+* **Check:** on a follower whose `poolnxt/<pool>` names it, block port 2379 to the leader for ~10 s: `zpooltoimport.py` prints "leader etcd not readable" / "held by
+  <owner> (ready)", `zpool history -l` shows no import on the follower; a real power cut of the owner still moves the pool within the usual time.
+
+## 111. The fapilooper start of note 109 left a setup shell running for ever — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 21 settle of node3 after acd8996f: `/usr/bin/sh /TopStor/docker_setup.sh` (PPID 1, in `do_wait`) never ended, so every check for
+  "setup still running" waited forever.
+* **Root cause:** `pgrep -f /pace/fapilooper.sh >/dev/null || setsid nohup /pace/fapilooper.sh ... &` puts the whole `||` list in a background sh, which runs
+  setsid as its child and waits for the looper. In `docker_primary.sh` that shell also kept leaderlost.sh's stdout open.
+* **Fix (TopStor 0cebd0bb):** `docker_setup.sh` / `docker_primary.sh`: `pgrep -f /pace/fapilooper.sh >/dev/null || setsid -f nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null`
+  (no `&`; `setsid -f` forks the looper into its own session and returns at once; util-linux 2.37 on the nodes).
+* **Check:** after setup `pgrep -af docker_setup.sh` is empty and `pgrep -f fapilooper` shows one looper.
