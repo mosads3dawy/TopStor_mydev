@@ -3730,3 +3730,24 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   no ActPool id -> no import and no scan; scan without the pool / empty / same name other id / UNAVAIL / duplicate id -> no import.
   On a node: boot the holder of the only good leg alone; within one round `zpool list` shows the pool DEGRADED, the guard log shows the
   `importing` line once and no `stale keys removed`; `zpool history` shows `zpool import -d /dev/disk/by-id <id>`.
+* **Follow-up (validator 643e CHANGES_NEEDED on pace 3cc40081):**
+  * **F1 (double import):** a node that boots as PRIMARY (no cluster ip found) wipes `hosts/` and `ready/` (`docker_setup.sh:571`), and
+    its own etcd copy may hold `pools/<pool>` = itself (node3's `/root/etcddata` in 643d) or nothing. Then neither the hosts/*/current
+    check nor `ownergone()` pings the real holder, and the by-id scan sees the holder's live leg (hostid 0, so no "in use" refusal).
+    Fix: on the by-scan path only, `peersclear()` checks EVERY other host in `ActivePartners/`: it must be ready with a published
+    `hosts/<h>/current` that does not list the pool, or silent to ping for `OWNERDOWNSECS` (60 s; mark
+    `/root/zpooltoimport-peerdown.<pool>.<host>`, any answer resets it). Otherwise no import this round and no stale-key delete.
+    ActivePartners unreadable -> no import. A real sole survivor imports after 60 s; a whole-cluster power-on imports once the
+    peer is ready and has published its current. Marks of the pool are removed after the import.
+  * **F2:** `scanimportable()` refuses a block whose status/action text (before `config:`) says `another system` or needs `-f`.
+  * **F3:** no by-id scan (and no stale-key delete) while any `/proc/spl/kstat/zfs/*/state` is SUSPENDED (`anysuspended()`): a scan
+    would sit in D state on the namespace lock, which `timeout=` cannot end.
+  * **F4:** after a by-scan import `legpaths()` logs the `zpool status -P` device paths to the guard log and writes a `WARNING` line
+    for a leg that is not a `scsi-`/`wwn-` device (e.g. a raw `ata-` local backing disk).
+  * deploy packages (n1d/n3d): the bundles are kept when `rc != 0`, for a retry.
+  * **Check (follow-up):** `t117/test117.py` adds: stale self `pools/` key + wiped `hosts/`/`ready/` + holder answering ping -> no import
+    and no stale delete (also 100 s later); holder silent 0 s / 30 s -> no import, 61 s -> one exact-id import and the peer mark gone; a
+    ping answer resets the wait; peer ready with a published current without the pool -> import; ready without current and answering
+    -> no import; peer current lists the pool -> no import; ActivePartners unreadable -> no import; own entry ignored; "last accessed
+    by another system" + `-f` block -> no import; "currently imported by another system" -> parser False; SUSPENDED -> no scan, no
+    import, no delete; `ata-` leg -> WARNING logged.
