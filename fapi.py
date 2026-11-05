@@ -2151,6 +2151,18 @@ def api_partners_freeport(data):
 def AddPartner(data):
  if 'baduser' in data['response']:
   return {'response': 'baduser'} 
+ # the command string is split on ' ' (postchange), so whitespace inside an argument shifts or corrupts the arguments; a phrase
+ # with a trailing newline ended up in the sync key name and broke etcd sync on both clusters (QC test 22 step 16.5).
+ # Strip the values and refuse empty ones or whitespace inside them (and '/' in ip, type and phrase: the Partner value is
+ # 'ip/type/port/phrase'; '/' in the alias is mapped to ':::' by PartnerAdd.py), like the port guard below.
+ for k in ('ip','alias','type','port','pass'):
+  if k in data and isinstance(data[k], str):
+   data[k] = data[k].strip()
+ for k in ('ip','alias','type','pass'):
+  v = str(data.get(k,''))
+  if v == '' or any(c.isspace() for c in v) or (k != 'alias' and '/' in v):
+   logmsg.sendlog('Partnargfa','error','system',loggedusers[data['token']]['user'])
+   return 'invalid '+('phrase' if k == 'pass' else k)
  isvu =  int(is_valid_ip(data['ip']))+int(is_unique_ip(data['ip']))
  if isvu == 0:
         print('ip is valid')
@@ -2169,7 +2181,7 @@ def AddPartner(data):
   return 'select another port'
 
  print('##########################33333')
- print(data)
+ print({k: v for k, v in data.items() if k != 'pass'})
  print('##########################33333')
  cmdstring = '/TopStor/PartnerAdd.py '+data['ip']+' '+data['alias']+' '+data['type']+' '+data['port']+' '+data['pass']+' '+data['user'] + ' init'
  postchange(cmdstring)

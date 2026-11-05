@@ -42,6 +42,9 @@ def addpartner(*bargs):
     etcd = leaderip
  else:
     etcd = myhostip
+ # strip every argument: a phrase with a trailing newline (API caller) went into the sync key name and broke the line-paired
+ # etcd parsing on every node (QC test 22 step 16.5)
+ bargs = [str(x).strip() for x in bargs]
  partnerip = bargs[0]
  partneralias = bargs[1].replace('_','').replace('/',':::')
  replitype = bargs[2]

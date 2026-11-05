@@ -118,6 +118,7 @@ IPaddrfa:0: : from :: Invalid IP address in the request
 IPadduqfa:0: : from :: The IP address is already in use 
 IPnamuqfa:0: : from :: The name is already in use 
 Partnportfa:0: : from :: The partner port is invalid (3001-8000) or already in use, select another port
+Partnargfa:0: : from :: The partner ip, alias, type or phrase is empty or contains a space, a line break or '/'
 IPaddrclufa:0: : from :: The cluster ip address is the same node address, this is not valid 
 Unst1024:1: : from :: Changing profile of user :
 Unsu1024:1: : from :: Success changing profile of user :
