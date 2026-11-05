@@ -3651,3 +3651,50 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   already on bond0) logs `already on bond0, cmynode not re-activated` and no bond re-activation. `cifs.sh` with an empty mounts argument exits 2
   and `cifs.py` does not retry. Boot a node as primary while another node holds the pool: `pools/<pool>` stays, `zpooltoimport-guard.log`
   shows `not ready but it answers ping: not imported`, and `zpool list` shows the pool on the holder only.
+
+## 116. selectspare replaced the HEALTHY mirror leg with a dm zero stub (pool SUSPENDED, leg labels wiped); a take-over imported a deleted pool by a plain scan — `QSD5.315` (2026-11-06) `M`
+
+* **Found by:** QC test 22 step 18 (validator 643d). node1 (leg sdg1 over iSCSI .101) was gone since 21:15 EST; after the take-over made
+  the leader etcd readable on node3, `selectspare.py` ran `zpool replace -f pdhcp719214006 5982037249893984143 /dev/dm-0` (5982.. =
+  node3's own HEALTHY leg, dm-0 = a `mkdm.sh` "zero" device). The resilver into /dev/zero finished in 172 ms, ZFS detached the replaced
+  (healthy) child and wrote its labels with txg 0, the pool SUSPENDED. The same take-over also imported pool id 9940.. of a pool deleted
+  hours earlier (its poolnxt/pools/ActPool keys were still in node3's local etcd, which `docker_primary.sh:51` promotes).
+* **Root cause A (pace `selectspare.py` `solvedegradedraid()`):** the faulty guid came from the `zdb -e -C` lines by POSITION
+  (`faultdisk[eindex-1]`). The product's by-id name of node1's leg is not in node3's config (path `/dev/sdg1`), nothing matched, `eindex`
+  stayed 0 and `faultdisk[-1]` = the last leaf = the healthy leg. Nothing checked that the guid was the faulty disk or not ONLINE. The dm
+  stub design is dangerous even with the right guid: a replace onto a device that discards writes completes at once and ZFS then detaches
+  whatever was replaced. Upstream logic (d083f55 / a3ffecc); 92fb4d3 only wrapped zdb in try/except.
+* **Fix A (pace):**
+  * new `pace/vdevsafe.py` (pure parsing, no etcd/zpool calls): `plan(diskname, zdb, status -gP, status -P, zero dms)`. Identity match
+    only: zdb `path`/`devid`/`phys_path` and the `zpool status -P` names / `was` paths paired line by line with `-gP` (guids); names are
+    normalized (basename, `-partN`, `sdg1` = `sdg`, `nvme0n1p1` = `nvme0n1`), compared for equality (no substring: `sda` != `sdaa`).
+    Not exactly one matching leaf guid -> nothing is done.
+  * `solvedegradedraid()`: skipped unless `/proc/spl/kstat/zfs/<pool>/state` is ONLINE/DEGRADED; the target must be
+    UNAVAIL/FAULTED/REMOVED/OFFLINE in `zpool status -gP` and at least one OTHER leaf of the same parent vdev (a leaf inside a
+    `replacing`/`spare` child counts) must be ONLINE and real (a path that is not a dm zero stub from `dmsetup table`; if dmsetup cannot be
+    read every dm leg counts as a stub). An ONLINE leaf is never replaced, offlined or detached. The dm stub (`mkdm.sh`) and the
+    `zpool replace ... /dev/dm-N` + detach are gone: FAULTED/REMOVED -> `zpool offline <pool> <dead guid>`; UNAVAIL/OFFLINE -> nothing
+    (the leg resilvers when its node returns). Stripe raids: `zpool detach <guid>` only for a resolved non-ONLINE target. Every zpool/zdb
+    call has a timeout (30/60 s); decisions are logged in `/root/solvedegraded.log`.
+  * `spare2()` needtoreplace (the genuine replacement by a real free disk; ZFS keeps the old leg as the source until the resilver is
+    complete): refused unless the pool is ONLINE/DEGRADED and the new disk is present (`/dev/disk/by-id/<name>` or `/dev/<name>`) and not a
+    `dm-` device.
+* **Root cause B (pace `zpooltoimport.py`):** `poolnxt/<pool>` named node3, no ready host listed the pool, `foreignpool()` is container
+  only, so the import ran; `memberimportdir()` found no member disk and the command was a PLAIN `zpool import <id>` (scans every device).
+* **Fix B (pace):** no member disk here -> never import. The keys are kept for 300 s (`/root/zpooltoimport-nomember.<pool>`; right after
+  a take-over the node's own iSCSI disks may not be up yet), then the LEADER deletes `poolnxt/<pool>` and, if it names this node,
+  `pools/<pool>` by exact key and value (logged to `/root/zpooltoimport-guard.log`). With member disks the pool id must be listed by
+  `zpool import -d <memberdir>` (60 s timeout) before the import; the import is always `-d <memberdir>`.
+* **Not changed (documented; item 3 of the brief):** a purge of stale pool keys at the take-over (`docker_primary.sh` after the etcd
+  promotion) and on pool delete (TopStor: delete on the leader and broadcast to the members' local copies). At the take-over no host has
+  published `hosts/*/current` yet, so "no node lists the pool" cannot be decided there, and a pool whose only good copy sits on a node that
+  is OFF (exactly this incident's recovery: node1 holds the only importable leg) is listed by no ready host either. Purging
+  `ActPool/<pool>` then would drop the id that keeps a stale leg from being imported (note 110 / reguid). So only the zpooltoimport skip
+  path deletes, only `poolnxt`/`pools`, only after 300 s with no member disk; `ActPool/` and `needtoreplace/*/<pool>/` stay. A stale
+  `needtoreplace` of a non-imported pool only makes a `zpool replace` fail. The pool delete cleanup is left for a separate change.
+* **Lab note:** `cluster-reset` does not labelclear free disks of a node that moved clusters (node3 sdc still carried test-21 labels).
+* **Check:** offline stubbed checks (scratchpad `t116/test116.py`): `sdg` vs `/dev/sdg1`, by-id `-part1` devid, no match -> no command,
+  ONLINE target -> no command, other leg only a dm zero / not ONLINE -> no command, SUSPENDED pool -> no command, FAULTED dead leg ->
+  exactly `zpool offline p1 <dead guid>`. On a node: a degraded mirror with a dead remote leg logs `-> keep <guid>` (UNAVAIL) in
+  `/root/solvedegraded.log`, no `dm-` device appears in `dmsetup table`, no `zpool replace` in `zpool history`; a poolnxt of a pool with no
+  member disk logs `no member disk here, not imported` and no `zpool import <id>` without `-d` runs.
