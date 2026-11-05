@@ -3581,3 +3581,73 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
 * **Check:** after a boot (which re-runs the bond bounce) `heartbeat.py` keeps looping and no `nmap` child is older than ~20 s (`ps -o etime`); with the
   leader alive no new `nmap:` line naming it in `/root/heartproblem` and the leader key unchanged; after a hard cut of the leader the nextlead node takes
   over (leader key, cluster ip, pool imported on it only).
+
+## 115. A failed read of the leader etcd removed the working CIFS share and bounced the cluster bond on every pass; a node that boots as primary could import a pool a live node held — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 22 step 18 retest (validator 643c). node1 (leader) was stopped while node3's heartbeat was still hung (note 114, old
+  code running), so nobody held the cluster ip `.100` for minutes. node3's `VolumeCheck.py` (every 10 s) kept removing the running
+  `CIFS-10.11.11.160`, started `cifs.sh` with shifted arguments (`/root/cifsshtmp`: 4+1 fields, image `10.11.11.160`, prefix `CIFS`) and
+  ran `nmcli conn up cmynode` up to 5 times per pass: the share was down, bond0 was re-activated again and again, node3 answered ssh only
+  between freezes (the VirtualBox guest also showed RCU/timer stalls, which made each bounce last minutes).
+* **Root cause A (fail-open share path):**
+  * `pace/VolumeCheck.py:242-251` read `leader`, `ready/<me>` and `volumes` without `strict`: with the leader etcd unreachable they gave
+    `'_1'`, `'_1'` and `[]`. `[]` looked like "no volume is in etcd", so `getdirtyvols()` (`:48`) marked every local volume dirty on every
+    pass, `cifs()` ran `undockerthis.sh <ip>` (the running share container was removed first) and then `cifs.py '_1' ... '_1' '_1' ...`.
+  * `TopStor/cifs.py` imports `/TopStor/etcdgetpy.py`, which had no `strict` (the pace copy got it in note 110): the volume list of the ip
+    came back empty, the "ip in use" check passed, `smb.<ip>`/`tempsmb.<ip>` were removed, `mounts` stayed `''`, and the command line was a
+    string that `.split()` turned into one field less. It was retried 5 times.
+  * `TopStor/cifs.sh` parsed `echo $@ | awk`, checked nothing, did `docker rm -f`, `nmcli conn mod` with the shifted values and ALWAYS
+    `nmcli conn up cmynode` (also the domain branch, `:75`), i.e. a bond bounce on every share start even when the address was there.
+* **Fix A (pace + TopStor):**
+  * `pace/VolumeCheck.py`: `leader`, `ready/<me>`, `volumes`, `replivol` are read with `strict=True`; `'_1'`, `''` or `not reachable` ends
+    the pass (`sys.exit(0)`) before anything is touched, so a failed read can no longer make a volume dirty. New `restartargsok()`: in
+    `nfsnew()`, `cifs()` and `homes()` a dirty volume is undockered, re-registered and restarted only when leader, leaderip, myhost,
+    myhostip, etcdip, pool, name are real values, the ip is an IPv4 address and the prefix is numeric; otherwise the share is left as it is.
+  * `TopStor/etcdgetpy.py`: keyword-only `strict=False` like the pace copy (`['not reachable']` on etcdctl rc != 0 or a hang; strict
+    reads use a 30 s guard timeout). Non-strict calls and their 2 s timeout are unchanged.
+  * `TopStor/cifs.py`: refuses (prints and logs `refused: ...` to `/root/cifsrun.log`) when any of its ten arguments is `''`, `'_1'` or
+    `not reachable`; the `volume` and `Active` reads are strict and a failed one returns; no active volume of this ip/type -> return BEFORE
+    the `smb.<ip>`/`tempsmb.<ip>` removal; `mounts == ''` -> return; `cifs.sh` is called with an argument list (an empty field can no longer
+    shift the others); exit code 2 with the `cifs.sh: bad arguments` line is not retried.
+  * `TopStor/cifs.sh`: positional arguments instead of `echo $@ | awk` (both branches); before anything is touched it checks `$# >= 5`,
+    non-empty resname/mounts/vtype, an IPv4 address, a prefix 1-32, and for a domain share (`vtype` with `_`) `$# >= 10` with domain and
+    domain-server ip set; otherwise `exit 2` (the message shows the first five fields only, never the admin password). The share address is
+    added to `cmynode` (mod -/+ and ONE `conn up`) only when it is really missing from the cmynode device (`ip -4 -o addr show dev <dev>`) and
+    the mod worked; if the address is there only the profile is completed (no up). Domain branch: `ipv4.dns` is changed only when it differs,
+    and `conn up` runs once, only if the address or the dns changed.
+  * Not changed (same pattern, noted for later): `nfsnew.sh` (awk on `$@`, `-ipv4.addresses` + `conn up` at `:24-26` and `+` + `conn up`
+    at `:40-41`, i.e. two bounces per start), `nfs.sh` (`:3-6`, always `conn up`), `iscsi.sh`, `cifsremove.sh`/`nfsremove.sh`. Their
+    VolumeCheck callers are now behind the strict reads and `restartargsok()`, which removes the trigger seen here.
+* **Root cause B (R1, boot-time double import; from code, not observed):** a node that does not find the cluster ip boots as primary
+  (`docker_setup.sh:266-282`). On the primary the local etcd is the cluster etcd, and the boot deleted `pools/` three times
+  (`etcddellocal.py pool --prefix`, `etcddel.py $etcd pools --prefix`, `etcddel.py $myclusterip pools --prefix`) together with `ready/`
+  and `hosts/`. `refreshdisown.sh` (`:593`) starts `zpooltoimportlooper` before heartbeat (`:598`). Its guard (note 110) then saw no owner
+  (`pools/` gone), the pool not in `hosts/` (gone) and itself ready, and imported a pool that a live node (no cluster ip: hung heartbeat,
+  partition, or mid take-over) still held. hostid is 0 and `multihost=off`, so ZFS does not refuse the second import.
+* **Fix B (least invasive):**
+  * `TopStor/docker_setup.sh`: a primary boot keeps `pools/` (of the `pool*` keys the primary deletes only `poolnxt/` and `poolinfo/`; a
+    member clears its own local copy as before). `ready/`, `hosts/`, `vol/`, `list/` are still cleared.
+  * `pace/zpooltoimport.py` `ownergone()`: when `pools/<pool>` names another host that is NOT ready, the import waits until that host
+    (address from `ActivePartners/<host>`, read strictly) has not answered a ping (3 x 1 s) for 60 s in a row; any answer resets the wait and
+    is logged to `/root/zpooltoimport-guard.log` (marker `/root/zpooltoimport-ownerdown.<pool>`, removed after a successful import). No
+    known address -> import as before. In a normal take-over `hostlost()` deletes the lost host's `pools/` keys first, so this path is not
+    taken and the take-over is not delayed; a cold start of a whole cluster (pools/ naming a dead node) imports 60 s later than before.
+  * Why not "start zpooltoimportlooper after heartbeat's first pass": heartbeat's ActivePartners recovery (`hostfound`) re-adds a live
+    peer to `ready/` only if its etcd answers in that one pass (and a lone primary skips the recovery on later passes: `len(knowns) ==
+    knownsn == 1 -> continue`), so a flapping peer would still be missed; the owner check above does not depend on heartbeat.
+  * Not covered: a live holder that is not named in `pools/` (never written), and a holder whose network is silent for > 60 s while it keeps
+    the pool imported (e.g. a guest freeze). The real protection is a unique `/etc/hostid` per node plus `zpool set multihost=on` (MMP), as
+    recommended in note 110; that is a platform change and is not part of this fix. `docker_setup.container.sh` is not changed (one shared
+    kernel: a pool imported by another node container cannot be imported twice).
+* **Operational notes from the verdict (R2, R3), no code change:**
+  * R2: a graceful VirtualBox stop has no product export (`cstop.sh` is the container flavour; `docker_setup.sh:87 zpool export -a` runs only
+    at the next boot). During the shutdown the other node's heartbeat can declare the stopping node lost while it still has the pool imported
+    (seconds of double-import window). Use `cluster-stopnode.sh --export` (or a hard cut when the step asks for it) when the pool should move.
+  * R3: a leg that was away (here node1's sdg since 21:15 EST) is stale: importing it alone loses the later writes of the other leg, and the
+    other leg then rejoins from a forked history (resilver, possible checksum errors, scrub). Bring back the node that holds the current leg
+    first.
+* **Check:** with the leader etcd unreachable `VolumeCheck.py` prints `leader etcd not readable ..., pass skipped`, the running share
+  container stays, no new `/root/cifspytmp` with `'_1'`, no `connection-activate cmynode` in the journal. A normal share start (address
+  already on bond0) logs `already on bond0, cmynode not re-activated` and no bond re-activation. `cifs.sh` with an empty mounts argument exits 2
+  and `cifs.py` does not retry. Boot a node as primary while another node holds the pool: `pools/<pool>` stays, `zpooltoimport-guard.log`
+  shows `not ready but it answers ping: not imported`, and `zpool list` shows the pool on the holder only.
