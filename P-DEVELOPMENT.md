@@ -3551,3 +3551,33 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   * `insync()`: only keys containing `/request` are counted.
 * **Check:** with the junk present, after the deploy the `sync/Partnr` counts fall to the `initial/*` entries only (3/3/2 on .100/.102/.200) within a few
   passes and stay there, `isinsync` = yes; a partner re-add creates `.../request` + `.../request/dhcpX` acks that are pruned as before.
+
+## 114. A hung nmap froze heartbeat for ever: the next leader never took over when the leader died — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 22 step 18 (replication sender schedule on c1 after the step 17 hard power cut of the c1 leader node1): node3 (nextlead) never
+  took c1 over. Live: `heartbeat.py` (pid since boot 16:47:00) sat in `pipe_read` on its child `nmap --max-rtt-timeout 500ms -n -p 2379 <leaderip>`,
+  started 16:47:06 and still polling 4 h 55 min later; a fresh identical nmap ended in 1.6 s.
+* **Root cause:** `docker_setup.sh:598` starts `/pace/heartbeatlooper.sh`, and later in the same script (`:655-656`) `nmcli conn down/up cmynode`
+  rebuilds bond0 (new ifindex). The first leader probe began 1 s before bond0 was destroyed; nmap 7.92 / libpcap never recovers from losing the
+  interface mid-scan. `pace/heartbeat.py` ran every nmap (and ping, and its helper scripts) with no time limit, so one hung probe stopped failure
+  detection on that node for good (`heartbeatlooper.sh` only restarts an exiting heartbeat). The same exposure exists at run time: product scripts call
+  `nmcli conn down/up cmynode` in many places. Also: the bare `except` around the per-host nmap did not set `res`, so a failing first nmap crashed
+  heartbeat with a NameError.
+* **Fix (pace 0a07fa6):**
+  * `heartbeat.py`: every nmap gets `--host-timeout 5s` and a subprocess `timeout=15`; in the per-host probe a failed or timed-out nmap gives `res=''`
+    -> `doubt` -> the existing ping check; in the "wait for the new leader" loop of `hostlost()` it counts as not answering (that loop stays bounded at
+    300 s); the ActivePartners recovery probe is inside its existing `try/except`.
+  * `ping -w 1` gets `timeout=5`; a timeout counts as not answering (lost), like a failed ping.
+  * `hostlost.sh` `timeout=300` (on timeout a line in `/root/heartproblem`, the membership clean-up still runs), `hostfound.sh` `timeout=120` (already
+    in `try/except`), the four start-up `docker exec etcdclient` reads `timeout=30` (a raise ends heartbeat.py and the looper starts it again).
+  * `leaderlost.sh` (the take over: `docker_primary.sh`, pool import, cluster ip, containers) keeps NO timeout on purpose: killing a take over halfway
+    (pool imported but no cluster ip, or the leader key moved but no API) is worse than a slow one, and the restarted heartbeat would not redo it.
+  * Split brain: the 2 tries with 1 s sleep are kept. A host whose nmap gave no answer but whose ping answered (in the last try) is no longer declared
+    lost; it is probed again on the next loop. Before, two such tries ended in `hostlost()`, so a local nmap problem (e.g. a bond bounce making nmap
+    time out) could start a take over of a live leader. Detection of a dead host is unchanged: nmap and ping both silent -> lost, as before.
+  * `etcddel.py:49`: the per-key `etcdctl del` gets `timeout=2` inside `try`, like the read at `:21` (a timeout skips that key).
+* **Optional follow-up (not done):** start `heartbeatlooper.sh` in `docker_setup.sh` after the bond bounce (`:655-656`) instead of before it (`:598`).
+  That removes the boot race; the timeouts are the real fix because run-time `nmcli` bounces remain.
+* **Check:** after a boot (which re-runs the bond bounce) `heartbeat.py` keeps looping and no `nmap` child is older than ~20 s (`ps -o etime`); with the
+  leader alive no new `nmap:` line naming it in `/root/heartproblem` and the leader key unchanged; after a hard cut of the leader the nextlead node takes
+  over (leader key, cluster ip, pool imported on it only).
