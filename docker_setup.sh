@@ -618,7 +618,9 @@ echo /TopStor/getcversion.sh $myclusterip $leader $myhost >/dev/null & disown
 # fapi.py as soon as a flask container exists, i.e. right after the docker run below on the primary, or after a
 # take over (docker_primary.sh) on a node that is a follower now.  Started before the primary block so the API
 # still comes up first on the primary.
-pgrep -f /pace/fapilooper.sh >/dev/null || setsid nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null &
+# Started with setsid -f (forks and returns at once): "a || b &" ran both in a background sh that waited for the looper for ever
+# (a "/usr/bin/sh /TopStor/docker_setup.sh" process that never ended).
+pgrep -f /pace/fapilooper.sh >/dev/null || setsid -f nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null
 if [ $isprimary -ne 0 ];
 then
 	echo I am hhhhhhhhhhhhhhhhhhhhhhinnhgjjjjhhhhhhhhhhhhhere

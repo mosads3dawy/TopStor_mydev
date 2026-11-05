@@ -92,7 +92,8 @@ docker run -itd --rm --name flask --hostname apisrv -v /etc/localtime:/etc/local
 # The API: fapilooper starts fapi.py in the flask container.  docker_setup.sh starts it on every node, but make sure
 # it runs here too (a node set up without it would serve no API after the take over); detached, so heartbeat.py's
 # wait on leaderlost.sh is not held by it, and only once.
-pgrep -f /pace/fapilooper.sh >/dev/null || setsid nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null &
+# setsid -f forks and returns at once: "a || b &" left a background sh (holding this script's stdout) that waited for the looper for ever.
+pgrep -f /pace/fapilooper.sh >/dev/null || setsid -f nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null
 # No monitoring container here.  What a client needs first after a take over is the cluster ip, etcd, the UI and the
 # API, in that order.  grafana used to be recreated in this script (before httpd and flask, which cost them seconds; and
 # with /ToStor/promgrafhosts, a path that does not exist).  It was thrown away again a moment later: leaderlost.sh runs
