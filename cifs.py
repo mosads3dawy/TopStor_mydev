@@ -6,16 +6,44 @@ from sendhost import sendhost
 from time import sleep
 
 
+def refuse(why, *what):
+    # fail closed: start nothing, remove nothing, touch no interface; the volume stays dirty and the next volume check retries
+    print('cifs.py: share not started:', why, *what)
+    try:
+        with open('/root/cifsrun.log','a') as flog:
+            flog.write(str(datetime.datetime.now())+' refused: '+why+' '+' '.join(str(x) for x in what)+'\n')
+    except OSError:
+        pass
+
 def create(leader, leaderip, myhost, myhostip, etcdip, pool, name, ipaddr, ipsubnet, vtype,*args):
-    volsip = get(etcdip,'volume','/'+ipaddr+'/')
+    # A failed read of the leader etcd gave '_1' for leader/myhostip/etcdip (VolumeCheck.py) and an empty volume list here:
+    # the share files were removed, cifs.sh got shifted arguments (empty mounts) and re-activated the cluster interface on
+    # every try (QC test 22 step 18, QSD5.315).  Never act on such values.
+    for argname, argval in (('leader',leader), ('leaderip',leaderip), ('myhost',myhost), ('myhostip',myhostip),
+                            ('etcdip',etcdip), ('pool',pool), ('name',name), ('ipaddr',ipaddr), ('ipsubnet',ipsubnet),
+                            ('vtype',vtype)):
+        if str(argval).strip() in ('', '_1', 'not reachable'):
+            refuse('bad argument', argname, repr(argval))
+            return
+    volsip = get(etcdip,'volume','/'+ipaddr+'/', strict=True)
+    if 'not reachable' in str(volsip):
+        refuse('etcd not readable (volumes)', etcdip, ipaddr)
+        return
     volsip = [ x for x in volsip if 'active' in str(x) ]
-    nodesip = get(etcdip, 'Active','/'+ipaddr+'/') 
+    nodesip = get(etcdip, 'Active','/'+ipaddr+'/', strict=True)
+    if 'not reachable' in str(nodesip):
+        refuse('etcd not readable (Active)', etcdip, ipaddr)
+        return
     notsametype = [ x for x in volsip if vtype not in str(x) ]
     if (len(nodesip) > 0 and 'Active' in str(nodesip))or len(notsametype) > 0:
         print('ipaddr',ipaddr)
         print('nodesip',len(nodesip), nodesip)
         print('nodtsametype',len(notsametype), notsametype)
         print(' the ip address is in use ')
+        return
+    # nothing of this ip and type to serve: start nothing and keep the current share files (they were removed first)
+    if len([ x for x in volsip if x not in notsametype ]) == 0:
+        refuse('no active volume of this ip and type in etcd', etcdip, ipaddr, vtype)
         return
     resname = vtype+'-'+ipaddr
     cmdline='rm -rf /TopStordata/tempsmb.'+ipaddr
@@ -49,7 +77,10 @@ def create(leader, leaderip, myhost, myhostip, etcdip, pool, name, ipaddr, ipsub
                 with open('/'+pool+'/smb.'+leftvol, 'r') as fvol:
                     fip.write(fvol.read())
             except:
-               continue 
+               continue
+    if mounts == '':
+        refuse('no volume to mount', ipaddr, vtype)   # never start a share without its volumes
+        return
     cmdline = 'cp /TopStordata/tempsmb.'+ipaddr+' /TopStordata/smb.'+ipaddr
     subprocess.run(cmdline.split(),stdout=subprocess.PIPE)  
     if '_' not in vtype:
@@ -58,16 +89,21 @@ def create(leader, leaderip, myhost, myhostip, etcdip, pool, name, ipaddr, ipsub
     print('hihihihi')
     print('cmd: '+'/TopStor/cifs.sh '+resname+' '+mounts+' '+ipaddr+' '+ipsubnet+' '+vtype+' '+" ".join(args))
     print('end of cmd')
-    cmdline = '/TopStor/cifs.sh '+resname+' '+mounts+' '+ipaddr+' '+ipsubnet+' '+vtype+' '+" ".join(args)
+    # an argument list, not a split string: an empty field used to vanish and shift every later argument of cifs.sh
+    cmdline = ['/TopStor/cifs.sh', resname, mounts, ipaddr, ipsubnet, vtype] + list(args)
     # the share container can die within seconds of its start (docker --rm then removes it and its logs): after the second
     # take over of a test the container was created, found "not running" 2 s later and nobody started it again -- the
     # password loop below then ran for minutes against a container that did not exist, and VolumeCheck (which waits for
     # this script) could not repair anything.  Start it again until it stays up; keep the output of every try.
     running = False
     for attempt in range(5):
-        res = subprocess.run(cmdline.split(),stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        res = subprocess.run(cmdline,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         with open('/root/cifsrun.log','a') as flog:
-            flog.write(str(datetime.datetime.now())+' '+resname+' try '+str(attempt)+'\n'+res.stdout.decode()[-1500:]+'\n')
+            flog.write(str(datetime.datetime.now())+' '+resname+' try '+str(attempt)+' rc '+str(res.returncode)+'\n'+res.stdout.decode()[-1500:]+'\n')
+        if res.returncode == 2 and b'cifs.sh: bad arguments' in res.stdout:
+            # cifs.sh refused its arguments before touching anything: a retry would refuse them again
+            print('cifs.sh refused the arguments, see /root/cifsrun.log', resname)
+            return
         sleep(8)
         up = subprocess.run(['docker','ps','-q','-f','name=^'+resname+'$'],stdout=subprocess.PIPE).stdout.decode().strip()
         if up:

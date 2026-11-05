@@ -462,7 +462,15 @@ docker run -itd --rm --privileged \
 	       docker exec etcdclient /pace/etcdputlocal.py leaderip $myclusterip
 	       docker exec etcdclient /pace/etcdputlocal.py clusternode $myhost
 	       docker exec etcdclient /pace/etcddellocal.py sync/Snapperiod/initial $myhost request/$myhost 2>/dev/null
+	       # On a primary this local etcd IS the cluster etcd: keep pools/ there (owner of each pool; zpooltoimport.py checks a
+	       # named owner that is not ready before it imports, QC test 22 validator 643c R1).  A member clears its own copy as before.
+	       if [ $isprimary -eq 1 ];
+	       then
+	       docker exec etcdclient /pace/etcddellocal.py poolnxt --prefix 2>/dev/null
+	       docker exec etcdclient /pace/etcddellocal.py poolinfo --prefix 2>/dev/null
+	       else
 	       docker exec etcdclient /pace/etcddellocal.py pool --prefix 2>/dev/null
+	       fi
 	       docker exec etcdclient /pace/etcddellocal.py volume --prefix 2>/dev/null
 	       docker exec etcdclient /pace/etcddellocal.py sync/pool Add_ 2>/dev/null
 	       docker exec etcdclient /pace/etcddellocal.py sync/pool Del_ 2>/dev/null
@@ -503,7 +511,7 @@ docker run -itd --rm --privileged \
 	       echo hihi$checkcluster | grep $myclusterip
 	       done
 #############################3
-	       /TopStor/etcddel.py $etcd pools --prefix 
+	       [ $isprimary -eq 1 ] || /TopStor/etcddel.py $etcd pools --prefix    # primary: $etcd is the cluster etcd, pools/ is kept (see above)
 	       /TopStor/etcddel.py $etcd sync/pools --prefix 
 	       /TopStor/etcddel.py $etcd volume --prefix 
 	       /TopStor/etcddel.py $etcd sync/volume --prefix 
@@ -557,7 +565,9 @@ docker run -itd --rm --privileged \
 	       if [ $isprimary -ne 0 ];
 	       then
 	       /pace/etcddel.py $myclusterip sync/ready/Add_${myhost} --prefix
-	       /pace/etcddel.py $myclusterip pools --prefix
+	       # pools/ is NOT deleted any more: a node that became primary only because it found no cluster ip wiped the owner of a
+	       # pool that another live node still held, and its zpooltoimportlooper (started before heartbeat) imported it too
+	       # (double import, hostid 0 / multihost off).  A stale owner of a dead node is handled by zpooltoimport.py (ownergone).
 	       /pace/etcddel.py $myclusterip hosts --prefix
 	       /pace/etcddel.py $myclusterip vol  --prefix
 	       /pace/etcddel.py $myclusterip list --prefix
