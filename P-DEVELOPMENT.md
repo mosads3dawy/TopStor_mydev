@@ -3499,3 +3499,33 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
 * **Fix (TopStor 0cebd0bb):** `docker_setup.sh` / `docker_primary.sh`: `pgrep -f /pace/fapilooper.sh >/dev/null || setsid -f nohup /pace/fapilooper.sh >/dev/null 2>&1 </dev/null`
   (no `&`; `setsid -f` forks the looper into its own session and returns at once; util-linux 2.37 on the nodes).
 * **Check:** after setup `pgrep -af docker_setup.sh` is empty and `pgrep -f fapilooper` shows one looper.
+
+## 112. A partner phrase with a trailing newline flooded sync on both clusters and the leader lost its Partner keys — `QSD5.315` (2026-11-05) `M`
+
+* **Found by:** QC test 22 step 16.5 (wait for sync green in c1): `isinsync` stayed `no` on c1 and c2; `sync/Partnr/*` grew ~33 keys/min on the c1 leader
+  (values `/request`, chains `.../dhcpX/dhcpX/...`), and `Partner/DRsite_Receiver` vanished from the c1 etcds without a PartnerDel. Trigger: the harness sent
+  the phrase as `--data-urlencode "pass@file"`, which keeps the file's trailing newline (the web UI cannot send one).
+* **Root cause:** `fapi.py` AddPartner builds the command string and `postchange()` splits it on `' '` only, so the `
+` stayed in the phrase;
+  `PartnerAdd.py` put it into the key name `sync/Partnr/Add_...::<phrase>
+/request`. Every etcd reader pairs `etcdctl get --prefix` output by lines
+  (`pace/etcdget.py`, `etcdgetpy.py`, `etcddel.py`), so a key with an embedded newline shifts the pairing and yields fake `(key, '/request')` tuples;
+  `checksyncs.py` (~:580 `put(leaderip, syncleft+'/'+myhost, stamp)`) takes each as a new request and writes an ack whose value is `/request` again: an
+  ack-of-ack chain for ever, and `insync()` never sees all nodes acked. For each fake Partnr request the leader runs `synckeys(leaderip, leaderip,
+  'Partner', 'Partner')`; `pace/etcdsync.py` deleted the target first and `exit()`ed when the read failed (etcdctl timeout under load): the leader deleted its own Partner keys.
+* **Fix (TopStor 290d8fff, pace c062563):**
+  * `fapi.py` AddPartner: strips ip/alias/type/port/pass; refuses an empty value, whitespace inside one, or `/` in ip/type/phrase (message `Partnargfa`),
+    like the port guard; the debug print no longer shows the phrase.
+  * `PartnerAdd.py`: strips every argument (other callers, e.g. Partnersync).
+  * `pace/etcdsync.py`: copying a prefix onto itself (same host and key) is a no-op; the source is read first (`strict=True`) and on a failed read nothing
+    is deleted (the pass still ends as before); an empty successful read still clears the target.
+* **Not done (later):** the line-pair parsing itself (`etcdget*.py`, `etcddel.py`) is still fragile for any key or value with a newline; the robust fix
+  is `etcdctl get -w json` (base64 keys/values) in one shared reader. A filter "key starts with the prefix" does not help (the fake keys do).
+  Keys already flooded need a hand `etcdctl del --prefix` of the two `sync/Partnr/Add_...` roots (PartnerDel cannot address them, it uses etcddel.py).
+* **Also found, not done (separate item):** `topstorrecvreply.py:35` consumes with auto_ack and runs the pump synchronously on pika's BlockingConnection
+  thread, so heartbeats stop during a long command; under load rabbit drops the client and already-delivered (auto-acked) messages are lost (lost
+  UnixAddUser pumps in test 22 step 3). Direction: `auto_ack=False` + `basic_ack` after `actionreply.do`, `basic_qos(prefetch_count=1)`, run the command
+  outside the I/O thread (or a longer heartbeat).
+* **Check:** `partners/AddPartner` with a phrase ending in a newline or containing a space answers `invalid phrase` and logs `Partnargfa`; with a clean phrase
+  the partner is added; `etcdctl get sync/ --prefix -w json` shows no key containing `
+`; `isinsync` reaches yes; `Partner/*` stays on the leader under load.
