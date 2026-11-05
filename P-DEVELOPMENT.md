@@ -3698,3 +3698,35 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
   exactly `zpool offline p1 <dead guid>`. On a node: a degraded mirror with a dead remote leg logs `-> keep <guid>` (UNAVAIL) in
   `/root/solvedegraded.log`, no `dm-` device appears in `dmsetup table`, no `zpool replace` in `zpool history`; a poolnxt of a pool with no
   member disk logs `no member disk here, not imported` and no `zpool import <id>` without `-d` runs.
+
+## 117. Fix B of note 116 never imported a pool on a cold start / sole survivor (every disk 'pree'); poolnxt deleted and re-created every 5 min — `QSD5.315` (2026-11-06) `M`
+
+* **Found by:** QC test 22 step 18 recovery (hold 643-noimport, after validator 643d). node1 booted ALONE (node3 off) with pace 1688ff5a:
+  `zpool list` empty, `/root/zpooltoimport-guard.log` = `no member disk here, not imported` every ~25 s and `stale keys removed` every
+  ~300 s; selectimport re-created `poolnxt/pdhcp719214006` each time. A read-only `zpool import -d /dev/disk/by-id` listed
+  `pdhcp719214006` id 14784251261418597951 DEGRADED (node1's leg ONLINE, node3's leg UNAVAIL) = `ActPool/pdhcp719214006`; node1's
+  sdc/sde still carry labels of pool `pdhcp288205696` id 9940180792541655089 (a deleted pool, never to be imported).
+* **Root cause (pace `zpooltoimport.py`, note 116 fix B):** `memberimportdir()` takes the member disks from `hosts/*/current`. When the
+  pool is imported nowhere (whole-cluster power-on, sole survivor, this recovery) no host reports it, every disk shows pool `pree`, so the
+  directory is always empty and the import never happens; `nomemberhere()` then removed the keys after 300 s, in a loop. The old code
+  (0a07fa6e) ran a plain `zpool import <id>` here.
+* **Fix (pace `zpooltoimport.py`):** when no member disk is listed, import only if ALL of these hold:
+  * (unchanged) no host lists the pool in `hosts/*/current`, and `pools/<pool>` is absent, names this node, or names a host that is not
+    ready and has not answered a ping for 60 s (`ownergone()`, note 115);
+  * the expected id is known: `ActPool/<pool>` is a numeric id (no id -> never import by a scan);
+  * `localscan()`: `zpool import -d /dev/disk/by-id` (timeout 60 s) lists exactly ONE pool with this NAME and this exact ID, state
+    ONLINE or DEGRADED (`scanimportable()`, pure parser). Other pools of the scan, a same-name pool with another id, an UNAVAIL/FAULTED
+    entry, or two entries with the id -> no import.
+  Then `zpool import -d /dev/disk/by-id <id>` (no `-f`), the normal path afterwards (reguid / poouids retry, pools sync). While the
+  scan shows the pool importable, `nomemberhere()` is not run (no stale-key deletion, no poolnxt delete/re-create loop), and its
+  `/root/zpooltoimport-nomember.<pool>` mark is removed. Logged as `no member disk listed, /dev/disk/by-id shows id <id> importable
+  here: importing` in `/root/zpooltoimport-guard.log`. With member disks listed nothing changed (`-d <memberdir>` + `seenbyscan()`).
+* **Limit:** the exact id protects against legs detached while their node was away once the pool got a new guid (zpool reguid, note 110). A leg that
+  still has the current id (reguid refused on a degraded pool, poouids retry pending) is only kept out by the ready-host / pools-owner
+  checks above, as before 643d.
+* **Check:** offline stubbed checks (scratchpad `t117/test117.py`): cold start, all disks `pree`, scan = the evidence block (DEGRADED,
+  one ONLINE leg) plus the stale `pdhcp288205696` block (before or after) -> exactly one `zpool import -d /dev/disk/by-id
+  14784251261418597951`, no stale-key delete; another ready host lists the pool -> no import; `pools/` names a ready host -> no import;
+  no ActPool id -> no import and no scan; scan without the pool / empty / same name other id / UNAVAIL / duplicate id -> no import.
+  On a node: boot the holder of the only good leg alone; within one round `zpool list` shows the pool DEGRADED, the guard log shows the
+  `importing` line once and no `stale keys removed`; `zpool history` shows `zpool import -d /dev/disk/by-id <id>`.
