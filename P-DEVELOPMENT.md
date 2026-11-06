@@ -3751,3 +3751,38 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
     -> no import; peer current lists the pool -> no import; ActivePartners unreadable -> no import; own entry ignored; "last accessed
     by another system" + `-f` block -> no import; "currently imported by another system" -> parser False; SUSPENDED -> no scan, no
     import, no delete; `ata-` leg -> WARNING logged.
+
+## 118. API login answered HTTP 500 while a `known/` peer was down; stale peer-silent marks (validator 643e F5) — `QSD5.315` (2026-11-06) `M`
+
+* **Found by:** QC test 22 step 18 recovery (note-login-knowndown, validator-login REAL_APP_BUG). node1 booted alone with node3 OFF and
+  `known/dhcp134713` = 10.11.11.102 still in etcd: every `/api/v1/login` on 10.11.11.100:5001 returned HTTP 500
+  (`AMQPConnectionError` in `logmsg.sendlog` -> `sendhost`), so no token and no UI/API exactly while a node was down. It cleared when
+  node3 came back.
+* **Root cause:** `fapi.py login()` calls `logmsg.sendlog()` for both the good and the bad password without try/except
+  (`login_required` already wraps its calls). `sendlog()` sends to the leader and then to EVERY `known/` entry with no error handling,
+  so one unreachable host raised, and the `sync/log` + `log/` puts after the loop were skipped too. `sendhost.py` used pika's default
+  connection parameters (several seconds per attempt on dropped packets). `known/` can hold a down peer for a long time: `heartbeat.py`
+  only probes `ready/` hosts (a cold boot alone never runs `hostlost()` for the persisted entry).
+* **Fix (TopStor):** `sendhost.py`: `socket_timeout=3, blocked_connection_timeout=3, connection_attempts=1, stack_timeout=5` (pika 1.3.1
+  on the nodes and in the flask container). `logmsg.py sendlog()`: targets = leader + `known/` values, deduplicated, only well-formed
+  pairs; each send in its own try/except, a failure is skipped; the notification and the `sync/log` / `log/` puts always run.
+  `fapi.py login()`: both `sendlog` calls in try/except; a logging failure never changes the login result.
+  **(pace f372086d):** the same `sendlog()` change in `pace/logmsg.py` (no log puts there, as before).
+* **F5 (pace f372086d, validator 643e RE-REVIEW):** the `ownerdown`/`peerdown` marks of `zpooltoimport.py` (note 117) held only the
+  start time and live in `/root` (they survive reboots); a mark left behind when the by-scan path was no longer reached made a live
+  holder that missed its pings once count as "silent >= 60 s" at once. The marks now hold `<since> <last silent check>`;
+  `silentsince()` keeps the wait only while consecutive silent checks are at most `MARKSTALESECS` (30 s) apart; an older,
+  future-dated or old one-value mark restarts the 60 s wait (guard log: `... the 60 s wait restarts`). Rounds are 9 s + the work, so
+  normal rounds stay well inside 30 s; a node whose rounds take longer than 30 s (very slow scans) never completes the wait and
+  imports nothing by scan (fail closed; the guard log shows the restarts).
+* **Limit:** about 46 other `sendlog` calls in `fapi.py` are not wrapped; with the `sendlog()` change they no longer raise for a down
+  host (only for an etcd/put failure). `known/` cleanup of peers that are not in `ready/` (`heartbeat.py`) and the missing
+  `/pace/hostfound.sh` are not changed here. `pace/sendhost.py` keeps pika's defaults (its callers are background scripts).
+* **Check:** stub tests `t118/test118.py` (TopStor and pace): one unreachable `known/` host -> no exception, leader and the other host
+  sent once each, notification + 2 `sync/log` + 1 `log/` puts; leader and peer unreachable -> no exception, log puts still done;
+  `known/` read `_1` / empty -> leader only; `login()` good / bad password with `sendlog` raising or with a real `sendlog` and one
+  unreachable host -> returns the token / `baduser`. `t117/test117.py` adds: stale peerdown mark + live holder missing its pings once
+  -> no import, mark restarted and logged; old one-value mark, future last check, last check 31 s ago -> restart, no import; 30 s ago
+  with 100 s silence -> import; a 35 s gap in a run of silent checks -> restart, import only 60 s after it; stale ownerdown mark -> no
+  import; owner wait then peer wait in consecutive checks -> import, both marks removed. t116 unchanged (all pass). On a node: with a
+  `known/` peer down, `curl 'http://<clusterip>:5001/api/v1/login?...'` answers 200 with a token within a few seconds.

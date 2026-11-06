@@ -1696,11 +1696,17 @@ def login():
  userdict, token = setlogin(leaderip,myhost, data['user'],data['pass'])
  if token != 0:
   loggedusers[token] = userdict.copy()
-  logmsg.sendlog('Lognsu0','info','system',data['user'])
+  try:      # a logging failure (e.g. a known/ peer that is down) never changes the login result (note 118)
+   logmsg.sendlog('Lognsu0','info','system',data['user'])
+  except Exception as e:
+   print('login: sendlog failed', type(e).__name__)
   print('login okkkkkkk',loggedusers)
  else:
   print('login faileddddddddddddddddddd')
-  logmsg.sendlog('Lognfa0','error','system',data['user'])
+  try:
+   logmsg.sendlog('Lognfa0','error','system',data['user'])
+  except Exception as e:
+   print('login: sendlog failed', type(e).__name__)
   token = 'baduser'
  return jsonify({'token':token})
 @app.route('/api/v1/users/usersauth', methods=['GET','POST'])

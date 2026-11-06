@@ -15,7 +15,10 @@ def sendhost(host, req, que, frmhst, port=5672):
             f.writelines(lines[-30:])
 # creds=pika.PlainCredentials('rabb_'+frmhst,'YousefNadody')
  creds=pika.PlainCredentials('rabb_Mezo','YousefNadody')
- param=pika.ConnectionParameters(host, port, '/', creds)
+ # Short timeouts and one attempt: an unreachable host (a known/ peer that is down) must fail in seconds, not block the caller
+ # (logmsg.sendlog -> fapi.py login() returned HTTP 500 while a peer was off; P-DEVELOPMENT note 118).
+ param=pika.ConnectionParameters(host, port, '/', creds, socket_timeout=3, blocked_connection_timeout=3,
+                                 connection_attempts=1, stack_timeout=5)
  conn=pika.BlockingConnection(param)
  chann=conn.channel()
  chann.basic_publish(exchange='',routing_key=que, body=str(req))
