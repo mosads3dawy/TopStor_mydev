@@ -143,7 +143,7 @@ def getall(leadip, alldsks='0'):
     raiddisks = []
     raidsdict[raidname] = dict()
     raidsdict[raidname] = theraid.copy()
-    if raidname != 'free':
+    if raidname != 'free' and len(raidsdict[raidname]['disklist']) > 0:
      raidsdict[raidname] = getraidrank(raidsdict[raidname],raidsdict[raidname]['disklist'][0],raidsdict[raidname]['disklist'][0])
     theraid.pop('disklist',None)
     raidsdict[raidname]['disks'] = raiddisks
