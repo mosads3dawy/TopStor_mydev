@@ -122,6 +122,7 @@ then
 	echo useradd \-c"TopStor"$pas $homebase \-p $userpass \-s /usr/sbin/nologin $username
  	useradd -c"TopStor"$pas $homebase -p $userpass -s /usr/sbin/nologin $username 
  fi
+ homeowner=''
  echo $pullsync | grep pull
  if [ $? -ne 0 ]
  then
@@ -129,10 +130,20 @@ then
  	if [ $? -ne 0 ];
  	then
 		docker exec etcdclient docker exec etcdclient /TopStor/logmsg.py Unlin1024 info  $userreq $username $homedir
-  		echo hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
-  		echo /TopStor/VolumeCreateHOME $leaderip $homePool $username $size $username $HomeAddr $HomeSubnet active $userreq $myhost $userreq 
-  		/TopStor/VolumeCreateHOME $leaderip $homePool $username $size $username $HomeAddr $HomeSubnet active $userreq $myhost $userreq 
-  		echo hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+		# The home folder is a dataset of the home pool, so it is made on the node that has the pool imported (etcd
+		# pools/<pool> = owner), like every other volume create. Made here it failed ("no such pool") whenever another node
+		# owned the pool (P-DEVELOPMENT note 122). For another owner the create is sent below, after usersinfo is written.
+		homeowner=`/pace/etcdget.py $leaderip pools/$homePool 2>/dev/null`
+		if [ -n "$homeowner" ] && [ "$homeowner" != "_1" ] && [ "$homeowner" != "$myhost" ]
+		then
+			echo the home pool $homePool is on $homeowner: the home folder is created there
+		else
+			homeowner=''
+  			echo hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+  			echo /TopStor/VolumeCreateHOME $leaderip $homePool $username $size $username $HomeAddr $HomeSubnet active $userreq $myhost $userreq
+  			/TopStor/VolumeCreateHOME $leaderip $homePool $username $size $username $HomeAddr $HomeSubnet active $userreq $myhost $userreq
+  			echo hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+		fi
 	fi
  fi
 
@@ -182,6 +193,19 @@ then
   if [ $? -ne 0 ]
   then
   	docker exec etcdclient /TopStor/logmsg.py Unlin1022 info $userreq $username
+  fi
+  if [ -n "$homeowner" ]
+  then
+	# the owner has no copy of this user yet (the user sync comes later): newuser=<uid>:<gid> tells VolumeCreateHOME that
+	# the usersinfo just written is this new user, and gives it the numbers for the folder owner
+	ownerip=`/pace/etcdget.py $leaderip ready/$homeowner 2>/dev/null`
+	homereq="{'req': 'Pumpthis', 'reply': ['/TopStor/VolumeCreateHOME', '$leaderip', '$homePool', '$username', '$size', '$username', '$HomeAddr', '$HomeSubnet', 'active', '$userreq', '$homeowner', '$userreq', 'newuser=$userid:$usergd']}"
+	echo send to $homeowner $ownerip: $homereq
+	/TopStor/sendhost.py "$ownerip" "$homereq" recvreply $myhost
+	if [ $? -ne 0 ]
+	then
+		docker exec etcdclient /TopStor/logmsg.py NFS1006 error $userreq $homePool/$username
+	fi
   fi
  fi 
  echo hi1

@@ -29,6 +29,9 @@ zcomp=`echo "$@" | grep -o 'compression=[a-z0-9]*' | head -1 | cut -d= -f2`
 [ "$zcomp" = "off" ] || zcomp=lz4
 zdedup=`echo "$@" | grep -o 'dedup=[a-z]*' | head -1 | cut -d= -f2`
 [ "$zdedup" = "off" ] || zdedup=on
+# newuser=<uid>:<gid>: sent by UnixAddUser on the leader when this node owns the home pool (P-DEVELOPMENT note 122). The
+# usersinfo of the user is already written then, and this node may not have the user yet.
+newuser=`echo "$@" | grep -o 'newuser=[0-9]*:[0-9]*' | head -1 | cut -d= -f2`
 DG=$pDG;
 hi=`whoami`
 echo start $hi $userreq > /root/volcreate
@@ -56,7 +59,8 @@ then
  # etcdget answers "_1" for a key that does not exist: that is "no such user yet" (UnixAddUser calls this script BEFORE it
  # writes usersinfo/<user>), not an existing user.  Taking "_1" for a user made every new user with a home pool
  # look like one that already has a home folder, and no home folder was ever created (QSD5.237, found by the QC test users_2nodes).
- if [ ! -z "$current_userinfo" ] && [ "$current_userinfo" != "_1" ]; then
+ # a new user sent with newuser=: its usersinfo names this pool already; the volumes check below still refuses a second home
+ if [ ! -z "$current_userinfo" ] && [ "$current_userinfo" != "_1" ] && [ -z "$newuser" ]; then
   current_pool=$(echo "$current_userinfo" | awk -F'/' '{print $2}')
   
   # Check if user already has a home folder (pool is not "NoHome")
@@ -77,6 +81,17 @@ then
   		docker exec etcdclient /TopStor/logqueue.py `basename "$0"` finish $userreq
   		exit
  	fi
+ fi
+ if [ -n "$newuser" ]
+ then
+  # the share container of the home folder sets the samba password of the users this node has: wait (up to 4 min) for
+  # the user sync of the leader to create the user here
+  for wait in `seq 1 120`
+  do
+   id -u $shortname >/dev/null 2>&1 && break
+   sleep 2
+  done
+  echo newuser $newuser local `id -u $shortname 2>&1` >> /root/volcreate
  fi
  usermod -d /$DG/$name $shortname
  echo privileged $name >> /root/volcreate
@@ -103,8 +118,14 @@ then
  /sbin/zfs set ip:subnet=$ipsubnet $DG/$name
  /sbin/zfs set status:mount=$active $DG/$name
  usermod -d /$DG/$name $shortname
- chown $shortname /$DG/$name
- chgrp $shortname /$DG/$name
+ if [ -n "$newuser" ] && ! id -u $shortname >/dev/null 2>&1
+ then
+  chown `echo $newuser | cut -d: -f1` /$DG/$name
+  chgrp `echo $newuser | cut -d: -f2` /$DG/$name
+ else
+  chown $shortname /$DG/$name
+  chgrp $shortname /$DG/$name
+ fi
  chmod 750 /$DG/$name
  #chmod o-rwx /$DG/$shortname -R
 
