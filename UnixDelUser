@@ -88,6 +88,7 @@ then
  # ./VolumeDeleteHome.py $pool $vol $userreq
   fi
   /pace/etcddel.py $etcd users /$username/
+  /pace/etcddel.py $etcd usersinfo/$username
   /pace/etcddel.py $etcd usershash/$username
   echo s$pullsync | grep pull
   if [ $? -ne 0 ];

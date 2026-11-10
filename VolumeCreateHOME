@@ -163,7 +163,8 @@ then
  # Update user's home pool information in etcd
  current_userinfo=$(/pace/etcdget.py $leaderip usersinfo/$shortname 2>/dev/null)
 
- if [ ! -z "$current_userinfo" ]; then
+ # only an existing record is updated: "_1", "-1" or empty = no usersinfo yet (UnixAddUser writes it later) or deleted
+ if [ ! -z "$current_userinfo" ] && [ "$current_userinfo" != "_1" ] && [ "$current_userinfo" != "-1" ]; then
   # Replace /NoHome/ with the actual pool /$DG/ and update quota
   updated_userinfo=$(echo "$current_userinfo" | sed "s|/NoHome/|/$DG/|g" | awk -F'/' -v quota="$quota" '{OFS="/"; $4=quota; print}')
   ETCDCTL_API=3 /pace/etcdput.py $leaderip usersinfo/$shortname "$updated_userinfo"
