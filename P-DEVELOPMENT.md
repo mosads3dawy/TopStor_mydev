@@ -3858,3 +3858,12 @@ Requested by the front-end developer (UI side built in QSD5.307). Released on to
 * **Fix:** `aria-label={showPassword ? "Hide password" : "Show password"}` on that button. No `title` (no tooltip). Other components with an eye button: none (`showPassword` exists only in `QLogin.jsx`).
 * **Deploy note:** a topstorweb-only change is not rebuilt by `docker_setup.sh` when the marker `/TopStordata/uibuilt_<last 10 of the TopStor HEAD>` exists; build by hand with the `docker run ... quickstor-ui:latest npm run build` of `docker_setup.container.sh` (output `/topstorweb/build_react`, git-ignored). No restart (Apache serves the files).
 * **Commits:** topstorweb and TopStor (this note).
+
+## 126. `GET login/test` without a token answered HTTP 500 (Werkzeug debugger, KeyError 'token') instead of baduser — `QSD5.315` (2026-11-11) `M`
+
+* **Found by:** QC test 600 step 11 (id 5917, validator verdict `state/rounds/b600i3/verdict-5917.md`). The sheet calls `curl -sk -m 5 $WAPI/login/test` with no token and expects `{"response":"baduser"}` with HTTP 200 JSON; the product returned `500 text/html` with a stack trace (also on flask :5001 directly).
+* **Cause:** `fapi.py` `testlogin()` did `getlogin(data['token'])` on the query dict, so a missing `token` raised `KeyError` (no guard, `DEBUG` on shows the interactive debugger page).
+* **Fix:** `if not data.get('token'): return {'response': 'baduser'}` before `getlogin` (flat body, HTTP 200 JSON, same return style as the rest of the function). A present token behaves as before: valid -> `{"response":"admin"}`, expired/unknown -> the existing nested `{"response":{"response":"baduser"}}`.
+* **Not changed (same unguarded `data['token']` pattern, listed for review):** `logout()` (`dels('login',data['token'])`, `loggedusers.pop(data['token'])`) and `login_required` (`if data['token'] in loggedusers`), so every `@login_required` endpoint called without a token is also a 500; `login()` uses `data['user']` / `data['pass']` the same way. The sheet requires nothing of them.
+* **Deploy note:** `fapi.py` runs in the `flask` container from `/TopStor` (bind mount) with DEBUG and the Werkzeug reloader on; saving the file reloads it, no restart.
+* **Commits:** TopStor (this note).

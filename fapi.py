@@ -1684,6 +1684,8 @@ def logout():
 @app.route('/api/v1/login/test', methods=['GET','POST'])
 def testlogin():
  data = request.args.to_dict()
+ if not data.get('token'):
+  return { 'response': 'baduser' }
  loginresponse = getlogin(data['token'])
  return { 'response': loginresponse }
 
