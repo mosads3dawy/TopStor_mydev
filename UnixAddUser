@@ -194,7 +194,25 @@ then
   #userhash=`echo $userline | awk -F':' '{print $5}' | awk -F'TopStor' '{print $2}'`
   userhash=$pas
   
-  /TopStor/etcdput.py $etcd 'usersinfo/'$username $userid':'$usergd':/'$homePool'/'$username'/'$size'/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no'
+  # QSD5.355 (QC 625 step 6, verdict-6090): a member's copy (pull) keeps the privilege fields (5th field on) of the leader's
+  # record.  The fixed all-'no' tail reset them when the copy ran after a users/usersauth change (whose sync/priv request was
+  # already done there), and the full user sync of every boot/join did the same on every member.  The leader's record is read
+  # now (the newest); unreadable: the privileges the caller passed (argument 13, usersyncall.thread_add, plus the 3 fields it
+  # passes as arguments 7, 8, 12).  A first create (not pull) has no privileges, as before.
+  privtail='no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no/no'
+  echo $pullsync | grep -q pull
+  if [ $? -eq 0 ]
+  then
+	ldrinfo=`/pace/etcdget.py $leaderip usersinfo/$username 2>/dev/null | tail -n 1`
+	if echo "$ldrinfo" | grep -Eq "^[0-9]+:[0-9]+:/[^/ ]+/${username}/[^/ ]*/[^ ]+$"
+	then
+		privtail=`echo "$ldrinfo" | cut -d/ -f5-`
+	elif [ -n "$permis" ] && [ "$permis" != 'no' ]
+	then
+		privtail=`echo "$permis" | tr ',' '/'`/$HomeAddr/$HomeSubnet/$active
+	fi
+  fi
+  /TopStor/etcdput.py $etcd 'usersinfo/'$username $userid':'$usergd':/'$homePool'/'$username'/'$size'/'$privtail
   /TopStor/etcdput.py $etcd 'usershash/'$username $userhash
   #/TopStor/broadcast.py UserAdd /TopStor/pump.sh UnixAddUser_sync -d$myhost $username $userhash $userid $usergd $userhome
   echo $etcd 2222222222222222222222222222222222222222222222222222222222222222 
