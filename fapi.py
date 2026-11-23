@@ -1289,6 +1289,47 @@ def dgsinfo(data):
  dgsinfo['newraid'] = newraids(allinfo['disks'])
  return jsonify(dgsinfo)
 
+# QSD5.358 (QC 633 QX-034): 'pools/delpool' only queues DGdestroyPool on the owner and answers at once; the pool and its disks
+# stay in allinfo until the owner destroyed it and published its state (putzpool, 20-60 s).  A 'pools/newpool' right after the
+# delete (the UI's delete-then-create, the API's 'no wait') then built the offers from the old disks: no layout of the asked
+# redundancy existed, the KeyError reached the safety net and the caller read 'missing parameter: raid50'.  The delete is
+# remembered here and newpool waits (bounded) until every pending delete is done, then reads the disks again.
+# Only a delete that postchange really queued is remembered; an etcd read error counts as 'still deleting', not as done.
+_pending_delpools = {}               # pool -> time its delete was queued by this API
+DELPOOL_WAIT = 90                    # seconds a create waits at most for pending deletes
+
+def _delpool_busy(pool):
+ if pool in allinfo.get('pools', {}):
+  return True
+ if any(str(d.get('pool', '')) == pool for d in allinfo.get('disks', {}).values()):
+  return True
+ try:
+  rows = _getleader(leaderip, 'destroying/'+pool, '--prefix')
+ except Exception:
+  return True
+ if not isinstance(rows, list) or any(not isinstance(r, tuple) for r in rows):
+  return True                        # ['_1']: etcdctl failed or timed out, the marker is unknown
+ return any(str(r[0]) == 'destroying/'+pool for r in rows)
+
+def _wait_pending_delpools():
+ # returns the pools whose delete is still not done after the wait ([] = nothing pending, allinfo is fresh)
+ now = timestamp()
+ for p, t in list(_pending_delpools.items()):
+  if now - t > DELPOOL_WAIT:
+   _pending_delpools.pop(p, None)
+ if not _pending_delpools:
+  return []
+ deadline = max(_pending_delpools.values()) + DELPOOL_WAIT
+ while True:
+  getalltime('yes')
+  busy = [p for p in list(_pending_delpools) if _delpool_busy(p)]
+  for p in list(_pending_delpools):
+   if p not in busy:
+    _pending_delpools.pop(p, None)
+  if not busy or timestamp() >= deadline:
+   return busy
+  sleep(2)
+
 @app.route('/api/v1/pools/delpool', methods=['GET','POST'])
 @login_required
 @audit_command
@@ -1307,7 +1348,8 @@ def dgsdelpool(data):
  ownerip = allinfo['hosts'][data['owner']]['ipaddress']
  datastr = data['pool']+' '+data['user'] 
  cmndstring = '/TopStor/DGdestroyPool '+leaderip+' '+datastr
- postchange(cmndstring,data['owner'])
+ if postchange(cmndstring,data['owner']) == 'queued':
+  _pending_delpools[data['pool']] = timestamp()      # QSD5.358: a create right after this waits for the destroy
 # z= cmndstring.split(' ')
 # msg={'req': 'Pumpthis', 'reply':z}
 # sendhost(ownerip, str(msg),'recvreply',myhost)
@@ -1324,6 +1366,9 @@ def dgsaddtopool(data):
  keys = []
  dgsinfo = {'raids':allinfo['raids'], 'pools':allinfo['pools'], 'disks':allinfo['disks']}
  dgsinfo['newraid'] = newraids(allinfo['disks'])
+ if not dgsinfo['newraid'].get(data['redundancy']):
+  # QSD5.358: no such layout can be built from the free disks (was a KeyError: 'missing parameter: <redundancy>')
+  return jsonify({'response': 'error', 'message': 'no '+str(data['redundancy'])+' layout can be built from the free disks'}), 400
  if data['useable'] not in dgsinfo['newraid'][data['redundancy']]:
   keys = list(dgsinfo['newraid'][data['redundancy']].keys())
   keys.append(float(data['useable']))
@@ -1466,6 +1511,12 @@ def dgsnewpool(data):
         return {'response': 'baduser'}
 
     getalltime('yes')
+    busy = _wait_pending_delpools()      # QSD5.358: a pool deleted just before still holds its disks; wait (bounded) for it
+    if busy:
+        return jsonify({
+            'response': 'error',
+            'message': 'the delete of pool '+', '.join(busy)+' is still running; its disks are not free yet, try again shortly'
+        }), 409
 
     manual_cache = data.get('cache')
     if not isinstance(manual_cache, list):
@@ -1478,6 +1529,13 @@ def dgsnewpool(data):
         keys = []
         dgsinfo = {'raids':allinfo['raids'], 'pools':allinfo['pools'], 'disks':allinfo['disks']}
         dgsinfo['newraid'] = newraids(allinfo['disks'])
+
+        if not dgsinfo['newraid'].get(data['redundancy']):
+            # QSD5.358: no such layout can be built from the free disks (was a KeyError: 'missing parameter: <redundancy>')
+            return jsonify({
+                'response': 'error',
+                'message': 'no '+str(data['redundancy'])+' layout can be built from the free disks'
+            }), 400
 
         if data['useable'] not in dgsinfo['newraid'][data['redundancy']]:
             keys = list(dgsinfo['newraid'][data['redundancy']].keys())
